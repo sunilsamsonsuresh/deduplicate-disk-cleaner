@@ -3,12 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from diskcleaner import hashing, reports
-from diskcleaner.dedupe import apply_plan, load_plan
-from diskcleaner.duplicates import find_duplicates
-from diskcleaner.index import Index
-from diskcleaner.safeops import SafetyError, read_manifest, undo
-from diskcleaner.scanner import scan
+from diskcleaner import file_hashes, reports
+from diskcleaner.remove_duplicates import apply_plan, load_plan
+from diskcleaner.find_duplicates import find_duplicates
+from diskcleaner.file_index import Index
+from diskcleaner.safe_moves import SafetyError
+from diskcleaner.undo_log import read_manifest, undo
+from diskcleaner.scan_disk import scan
 
 
 def _report(cfg) -> Path:
@@ -35,7 +36,7 @@ def _edit_csv(path: Path, fn) -> None:
 def _snapshot(root: Path) -> dict:
     """relative path -> content hash, ignoring the tool's own folder."""
     return {
-        p.relative_to(root).as_posix(): hashing.full_hash(p)
+        p.relative_to(root).as_posix(): file_hashes.full_hash(p)
         for p in root.rglob("*") if p.is_file() and "_DiskCleaner" not in p.parts
     }
 

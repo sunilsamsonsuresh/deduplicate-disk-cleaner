@@ -1,6 +1,4 @@
-"""Organize photos/videos into  <dest>/<Category>/<Year>/<Year-Month [Event]>/ ."""
-
-from __future__ import annotations
+"""Sort photos and videos into  <destination>/<Category>/<Year>/<Year-Month [Event]>/ ."""
 
 import csv
 import os
@@ -8,14 +6,15 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from . import hashing
+from . import file_hashes
 from .config import Config
 from .dates import clean_event_name, event_name_for, resolve_date
-from .filetypes import CATEGORY_LABEL, SNIFF_EXT
-from .index import Index
-from .scope import WHOLE_DISK, Scope
-from .safeops import Manifest, SafetyError, resolve_inside, safe_copy, safe_move, unique_path
-from .utils import log, progress
+from .file_types import CATEGORY_LABEL, SNIFF_EXT
+from .file_index import Index
+from .selected_folders import WHOLE_DISK, Scope
+from .safe_moves import SafetyError, resolve_inside, safe_copy, safe_move, unique_path
+from .undo_log import Manifest
+from .helpers import log, progress
 
 PLAN_FIELDS = ["src", "dst", "category", "date", "date_source", "event"]
 JUNK_FILES = {".ds_store", "thumbs.db", "desktop.ini"}
@@ -32,12 +31,13 @@ class PlanItem:
 
 
 def _safe_component(s: str) -> str:
+    """Remove the characters that a folder name cannot have. Keep 80 characters at most."""
     s = "".join(ch for ch in s if ch not in '\\/:*?"<>|' and ord(ch) >= 32).strip(" .")
     return s[:80] or "Misc"
 
 
 def _date_folders(layout: str, category: str, date, event: str | None) -> str:
-    """'2015/2015-06 Goa Trip' (layout filled in), or 'Unknown Date/<event>' without a date."""
+    """Give '2015/2015-06 Goa Trip' (from the layout), or 'Unknown Date/<event>' if there is no date."""
     if not date.known:
         return f"Unknown Date/{_safe_component(event or 'Unsorted')}"
     if date.month:
@@ -49,7 +49,7 @@ def _date_folders(layout: str, category: str, date, event: str | None) -> str:
 
 
 def target_dir(cfg: Config, rel_path: str, category: str, date, event: str | None) -> str:
-    """Folder in the uniform tree: '_Organized/Photos/2015/2015-06 Goa Trip'."""
+    """Give the folder in the sorted tree: '_Organized/Photos/2015/2015-06 Goa Trip'."""
     label = CATEGORY_LABEL.get(category, category.title())
     if not date.known:
         return f"{cfg.organize_destination}/{label}/{_date_folders('', label, date, event)}"
@@ -57,8 +57,8 @@ def target_dir(cfg: Config, rel_path: str, category: str, date, event: str | Non
 
 
 def inside_roots(cfg: Config) -> list[str]:
-    """Expand [organize].organize_inside into concrete folders (relative to root).
-    'Existing Photos/*' -> every sub-folder of 'Existing Photos' separately."""
+    """Find the real folders for [organize].organize_inside (relative to the disk root).
+    'Existing Photos/*' gives each sub-folder of 'Existing Photos' as a separate folder."""
     excl = {e.lower() for e in cfg.exclude}
     out: list[str] = []
     for entry in cfg.organize_inside:
@@ -71,11 +71,12 @@ def inside_roots(cfg: Config) -> list[str]:
                         out.append(d.relative_to(cfg.root).as_posix())
         elif (cfg.root / entry).is_dir():
             out.append(entry)
-    # deepest first, so a nested entry wins over its parent
+    # deepest first. Thus a folder inside another folder wins.
     return sorted(set(out), key=lambda r: (-r.count("/"), r))
 
 
 def _root_for(path: str, roots: list[str]) -> str | None:
+    """Give the organize_inside folder that holds path, or None."""
     low = path.lower()
     for r in roots:
         if low.startswith(r.lower() + "/"):
@@ -84,13 +85,14 @@ def _root_for(path: str, roots: list[str]) -> str | None:
 
 
 def target_dir_inside(cfg: Config, root: str, date, event: str | None) -> str:
-    """Date folders inside an already-organized folder: '<root>/2019/2019-06 Birthday'."""
+    """Give the date folders inside a folder that is already sorted: '<root>/2019/2019-06 Birthday'."""
     if not date.known:
         return f"{root}/Unknown Date" + (f"/{_safe_component(event)}" if event else "")
     return f"{root}/{_date_folders(cfg.organize_layout_inside, '', date, event)}"
 
 
 def build_plan(cfg: Config, index: Index, scope: Scope = WHOLE_DISK) -> list[PlanItem]:
+    """Make the organize plan: one item for each photo or video that must move."""
     dest_prefix = cfg.organize_destination.lower() + "/"
     q_prefix = cfg.quarantine_dir.lower() + "/"
     extra_generic = set(cfg.generic_folder_names)
@@ -111,7 +113,7 @@ def build_plan(cfg: Config, index: Index, scope: Scope = WHOLE_DISK) -> list[Pla
         )
         parent = str(PurePosixPath(row.path).parent)
         if root:
-            # only folders *below* the organized folder can be event names
+            # only folders *below* the sorted folder can be event names
             parent = parent[len(root) + 1:] if len(parent) > len(root) else ""
         event = event_name_for(parent, extra_generic) if (cfg.keep_event_names and parent) else None
         if event:
@@ -123,10 +125,10 @@ def build_plan(cfg: Config, index: Index, scope: Scope = WHOLE_DISK) -> list[Pla
         pp = PurePosixPath(row.path)
         name = pp.name
         if pp.suffix.lower() in SNIFF_EXT and pp.suffix.lower() != row.ext:
-            # recovered without a usable extension: give it the real one so it opens
+            # the file has no correct extension. Give it the real one, so that it opens.
             name = pp.stem + row.ext if pp.suffix else pp.name + row.ext
         if f"{dst_dir}/{name}".lower() == low:
-            continue  # already in the right place
+            continue  # the file is already in the correct place
         dst_full = unique_path(cfg.root / dst_dir / name, reserved)
         reserved.add(str(dst_full).lower())
         items.append(PlanItem(
@@ -141,6 +143,7 @@ def build_plan(cfg: Config, index: Index, scope: Scope = WHOLE_DISK) -> list[Pla
 
 
 def write_plan_csv(items: list[PlanItem], path: Path) -> None:
+    """Write the plan to a CSV file."""
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=PLAN_FIELDS)
         w.writeheader()
@@ -149,6 +152,7 @@ def write_plan_csv(items: list[PlanItem], path: Path) -> None:
 
 
 def read_plan_csv(path: Path) -> list[PlanItem]:
+    """Read a plan from a CSV file (you can edit the file before)."""
     with open(path, newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
         missing = {"src", "dst"} - set(reader.fieldnames or [])
@@ -158,6 +162,7 @@ def read_plan_csv(path: Path) -> list[PlanItem]:
 
 
 def plan_summary(items: list[PlanItem]) -> dict:
+    """Count the files in the plan by date source, year and category."""
     return {
         "files": len(items),
         "by_source": Counter(i.date_source for i in items),
@@ -177,6 +182,7 @@ class OrganizeResult:
 
 def apply_plan(cfg: Config, items: list[PlanItem], index: Index | None = None, mode: str | None = None,
                plan_name: str = "") -> OrganizeResult:
+    """Move (or copy) each file in the plan. Write each step to the undo log."""
     mode = mode or cfg.organize_mode
     res = OrganizeResult()
     dest_prefix = cfg.organize_destination.lower() + "/"
@@ -187,7 +193,7 @@ def apply_plan(cfg: Config, items: list[PlanItem], index: Index | None = None, m
             try:
                 dst_root = _root_for(it.dst, roots)
                 if dst_root:
-                    # never move a file from one organized folder into another
+                    # never move a file from one sorted folder into a different one
                     if _root_for(it.src, roots) != dst_root:
                         res.skipped.append(f"{it.src}: would move into a different folder ({dst_root}) - refused")
                         continue
@@ -200,7 +206,7 @@ def apply_plan(cfg: Config, items: list[PlanItem], index: Index | None = None, m
                     res.skipped.append(f"{it.src}: no longer exists")
                     continue
                 if dst.exists():
-                    if dst.stat().st_size == src.stat().st_size and hashing.full_hash(dst) == hashing.full_hash(src):
+                    if dst.stat().st_size == src.stat().st_size and file_hashes.full_hash(dst) == file_hashes.full_hash(src):
                         res.identical_skipped += 1
                         res.skipped.append(f"{it.src}: identical file already at {it.dst} (a duplicate - left in place)")
                         continue
@@ -225,11 +231,11 @@ def apply_plan(cfg: Config, items: list[PlanItem], index: Index | None = None, m
 
 
 # ---------------------------------------------------------------------------
-# Empty folder clean-up
+# Remove empty folders
 # ---------------------------------------------------------------------------
 def find_empty_dirs(cfg: Config) -> list[Path]:
-    """Folders that contain nothing (or only .DS_Store/Thumbs.db/desktop.ini), deepest first.
-    A folder whose sub-folders are all empty counts as empty too."""
+    """Find the empty folders, deepest first. A folder is empty if it has no files
+    (or only .DS_Store, Thumbs.db or desktop.ini). A folder with only empty sub-folders is also empty."""
     skip = {cfg.quarantine_path.resolve(), cfg.state_dir.resolve()}
     excl_names = {e.lower() for e in cfg.exclude}
     empty: set[Path] = set()
@@ -240,7 +246,7 @@ def find_empty_dirs(cfg: Config) -> list[Path]:
             continue
         parts = d.relative_to(cfg.root).parts
         if any(p.startswith(".") or p.lower() in excl_names for p in parts):
-            continue  # system / hidden folders are left alone
+            continue  # do not touch system folders and hidden folders
         rd = d.resolve()
         if rd in skip or any(s in rd.parents for s in skip):
             continue
@@ -253,13 +259,14 @@ def find_empty_dirs(cfg: Config) -> list[Path]:
 
 
 def remove_empty_dirs(dirs: list[Path]) -> int:
+    """Remove the folders in the list. Give the number of removed folders."""
     n = 0
     for d in dirs:  # deepest first
         try:
             for f in d.iterdir():
                 if f.is_file() and f.name.lower() in JUNK_FILES:
                     f.unlink()
-            d.rmdir()  # fails safely if anything is still inside
+            d.rmdir()  # this fails (safely) if the folder is not empty
             n += 1
         except OSError as exc:
             log.warning("could not remove folder %s: %s", d, exc)

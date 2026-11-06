@@ -1,6 +1,5 @@
-"""Duplicate reports: CSV (the editable plan), HTML (visual review) and console summary."""
-
-from __future__ import annotations
+"""Duplicate reports: a CSV (the plan that you can edit), an HTML page (to look at)
+and a summary on the screen."""
 
 import csv
 import datetime as dt
@@ -11,9 +10,9 @@ from collections import defaultdict
 from pathlib import Path, PurePosixPath
 
 from .config import Config
-from .duplicates import KEEP, REMOVE, REVIEW, SKIP, DuplicateResult, Group, Member
-from .filetypes import DECODABLE_IMAGE_EXT
-from .utils import human_size
+from .find_duplicates import KEEP, REMOVE, REVIEW, SKIP, DuplicateResult, Group, Member
+from .file_types import DECODABLE_IMAGE_EXT
+from .helpers import human_size
 
 DUP_CSV_FIELDS = [
     "group_id", "tier", "action", "path", "size_bytes", "size", "width", "height",
@@ -26,7 +25,17 @@ TIER_DESC = {
 }
 
 
+def _group_hash(g: Group, m: Member) -> str:
+    """Give the hash that put this file in its group."""
+    if g.tier == "exact":
+        return m.row.full_hash or ""
+    if g.tier == "pixel":
+        return m.row.pixel_hash or ""
+    return m.row.dhash or ""
+
+
 def write_duplicates_csv(result: DuplicateResult, path: Path) -> None:
+    """Write the plan CSV: one row for each file in each group."""
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=DUP_CSV_FIELDS)
         w.writeheader()
@@ -52,11 +61,12 @@ def write_duplicates_csv(result: DuplicateResult, path: Path) -> None:
                     "distance": "" if m.distance is None else m.distance,
                     "in_selected_folders": "yes" if m.in_scope else "no",
                     "kept_because_or_note": note,
-                    "hash": (m.row.full_hash if g.tier == "exact" else m.row.pixel_hash if g.tier == "pixel" else m.row.dhash) or "",
+                    "hash": _group_hash(g, m),
                 })
 
 
 def summarize(result: DuplicateResult) -> dict:
+    """Count the groups, the files and the bytes for each tier."""
     out = {}
     for tier in ("exact", "pixel", "similar"):
         gs = result.by_tier(tier)
@@ -70,6 +80,7 @@ def summarize(result: DuplicateResult) -> dict:
 
 
 def print_summary(result: DuplicateResult) -> None:
+    """Print the duplicate summary on the screen."""
     s = summarize(result)
     print(f"\nDuplicate summary  (selected: {result.scope.label()})")
     print("-" * 72)
@@ -121,7 +132,7 @@ def _copy_info(o: Member, g: Group) -> dict:
 
 
 def per_file_view(result: DuplicateResult) -> dict[str, dict]:
-    """One entry per file inside the selected folders that has at least one other copy."""
+    """Give one entry for each file in the selected folders that has one or more other copies."""
     files: dict[str, dict] = {}
     for g in result.groups:
         keeper = g.keeper
@@ -167,6 +178,7 @@ def per_file_view(result: DuplicateResult) -> dict[str, dict]:
 
 
 def folder_summary(result: DuplicateResult, view: dict[str, dict] | None = None) -> dict[str, dict]:
+    """Count the files with copies in each folder."""
     view = view if view is not None else per_file_view(result)
     out: dict[str, dict] = defaultdict(lambda: {"files_with_copies": 0, "remove_files": 0, "review_files": 0,
                                                 "keep_files": 0, "remove_bytes": 0})
@@ -184,8 +196,8 @@ def folder_summary(result: DuplicateResult, view: dict[str, dict] | None = None)
 
 
 def write_duplicates_json(result: DuplicateResult, cfg: Config, path: Path, csv_path: Path) -> None:
-    """Review file: for every file in the selected folders that also exists elsewhere,
-    list where all the other copies are and what will happen to each."""
+    """Write the review file. For each file in the selected folders that has copies,
+    it shows where all the other copies are, and what happens to each one."""
     view = per_file_view(result)
     by_folder: dict[str, list[dict]] = defaultdict(list)
     for p in sorted(view):
@@ -223,7 +235,7 @@ def write_duplicates_json(result: DuplicateResult, cfg: Config, path: Path, csv_
 
 
 def unreadable_paths(result: DuplicateResult) -> list[str]:
-    """Unique paths from read errors ('path: Error: message')."""
+    """Give each path from the read errors one time ('path: Error: message')."""
     seen: dict[str, str] = {}
     for e in result.read_errors:
         path, _, why = e.partition(": ")
@@ -237,6 +249,7 @@ def _file_url(p: Path) -> str:
 
 def write_duplicates_html(result: DuplicateResult, cfg: Config, path: Path, csv_path: Path,
                           max_groups: int = 3000) -> None:
+    """Write the HTML report, with a small picture of each image."""
     s = summarize(result)
     parts = [f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

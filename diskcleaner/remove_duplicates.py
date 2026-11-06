@@ -1,19 +1,18 @@
-"""Apply a (possibly user-edited) duplicates CSV: move REMOVE files to quarantine,
-after re-verifying each one against a file that is definitely being kept."""
-
-from __future__ import annotations
+"""Use the duplicates CSV (you can edit it) to move the REMOVE files to the quarantine.
+Before each move, the tool checks the file again against a copy that it keeps."""
 
 import csv
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import hashing, media
+from . import file_hashes, media_info
 from .config import Config
-from .index import Index
-from .scope import WHOLE_DISK, Scope
-from .safeops import Manifest, SafetyError, resolve_inside, safe_move
-from .utils import log, parallel_map
+from .file_index import Index
+from .selected_folders import WHOLE_DISK, Scope
+from .safe_moves import SafetyError, resolve_inside, safe_move
+from .undo_log import Manifest
+from .helpers import log, parallel_map
 
 REQUIRED_COLUMNS = {"group_id", "tier", "action", "path"}
 TIER_ORDER = {"exact": 0, "pixel": 1, "similar": 2}
@@ -31,10 +30,10 @@ class PlannedRemoval:
 @dataclass
 class DedupePlan:
     removals: list[PlannedRemoval]
-    refused_groups: list[str] = field(default_factory=list)  # human-readable reasons
+    refused_groups: list[str] = field(default_factory=list)  # the reasons, in words
     review_count: int = 0
     skip_count: int = 0
-    outside_scope: int = 0  # REMOVE rows ignored because they are outside --folder
+    outside_scope: int = 0  # REMOVE rows that the tool ignores, because they are outside --folder
 
     @property
     def total_bytes(self) -> int:
@@ -52,8 +51,8 @@ class DedupeResult:
 
 def load_plan(csv_path: Path, cfg: Config, only_tiers: set[str] | None = None,
               scope: Scope = WHOLE_DISK) -> DedupePlan:
-    """Read the duplicates CSV. With a scope, only files inside those folders are
-    removed (even if the CSV says REMOVE elsewhere)."""
+    """Read the duplicates CSV. With selected folders, remove only the files in these folders
+    (also if the CSV says REMOVE for other files)."""
     with open(csv_path, newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
         missing = REQUIRED_COLUMNS - set(reader.fieldnames or [])
@@ -71,7 +70,7 @@ def load_plan(csv_path: Path, cfg: Config, only_tiers: set[str] | None = None,
     def included(members: list[dict]) -> bool:
         return not only_tiers or members[0]["tier"] in only_tiers
 
-    # path -> groups (tier, gid) in which it is marked REMOVE
+    # for each path: the groups (tier, group id) where the path has REMOVE
     removed_in: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for gid, members in groups.items():
         if included(members):
@@ -80,9 +79,10 @@ def load_plan(csv_path: Path, cfg: Config, only_tiers: set[str] | None = None,
                     removed_in[m["path"]].append((m["tier"], gid))
 
     def survives(path: str, tier_rank: int, depth: int = 0) -> bool:
-        """Does this file's content survive the plan? Either it is not removed at all,
-        or it is only removed by a *later* tier whose own keeper survives (e.g. the
-        keeper of an exact group being a pixel-identical copy of another kept file)."""
+        """Does the content of this file stay on the disk after the plan?
+        Yes if the plan does not remove the file. Also yes if only a *later* tier removes it,
+        and the keeper of that group stays. (For example: the keeper of an exact group
+        is a pixel copy of another kept file.)"""
         if path not in removed_in:
             return True
         if depth > 3:
@@ -131,8 +131,7 @@ def load_plan(csv_path: Path, cfg: Config, only_tiers: set[str] | None = None,
             except ValueError:
                 size = 0
             plan.removals.append(PlannedRemoval(gid, tier, m["path"], keeper, size))
-    # Exact-tier removals first: they are verified against a keeper that a later
-    # tier may itself move away.
+    # Do the exact moves first. Their keeper can be a file that a later tier moves away.
     if not scope.whole_disk:
         inside = [r for r in plan.removals if scope.contains(r.path)]
         plan.outside_scope = len(plan.removals) - len(inside)
@@ -142,7 +141,7 @@ def load_plan(csv_path: Path, cfg: Config, only_tiers: set[str] | None = None,
 
 
 class _Verifier:
-    """Re-computes hashes of the kept file once per run."""
+    """Calculates the hashes again for the safety check. It calculates each file only one time per run."""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -151,12 +150,12 @@ class _Verifier:
     def _h(self, kind: str, path: Path) -> str | None:
         key = (kind, str(path))
         if key not in self.cache:
-            fn = {"exact": hashing.full_hash, "pixel": media.pixel_hash, "similar": media.dhash128}[kind]
+            fn = {"exact": file_hashes.full_hash, "pixel": media_info.pixel_hash, "similar": media_info.dhash128}[kind]
             self.cache[key] = fn(path)
         return self.cache[key]
 
     def check(self, tier: str, src: Path, keeper: Path) -> str | None:
-        """None if it is safe to remove src, otherwise the reason it isn't."""
+        """Give None if it is safe to remove src. If it is not safe, give the reason."""
         if not keeper.is_file():
             return "kept copy no longer exists"
         if src.resolve() == keeper.resolve():
@@ -172,13 +171,13 @@ class _Verifier:
             if self._h("pixel", src) != self._h("pixel", keeper):
                 return "pixels differ from kept copy"
         else:
-            self._h("similar", keeper)  # raises if the kept image is unreadable
+            self._h("similar", keeper)  # this gives an error if the tool cannot read the kept image
         return None
 
 
 def _precheck(cfg: Config, verifier: _Verifier, item: PlannedRemoval) -> str | None:
-    """Everything that can be checked before moving: None if it is safe to remove, else why not.
-    This is the slow part (it re-reads both files), so it runs on several threads."""
+    """Do all the checks that are possible before the move. Give None if it is safe, or the reason if not.
+    This is the slow part (it reads both files again). Thus it runs on more than one thread."""
     src = resolve_inside(cfg.root, item.path)
     keeper = resolve_inside(cfg.root, item.keeper)
     if item.path.lower().startswith(cfg.quarantine_dir.lower() + "/"):
@@ -189,21 +188,24 @@ def _precheck(cfg: Config, verifier: _Verifier, item: PlannedRemoval) -> str | N
 
 
 def apply_plan(cfg: Config, plan: DedupePlan, index: Index | None = None, csv_name: str = "") -> DedupeResult:
-    """Move every planned removal to the quarantine folder.
+    """Move each planned file to the quarantine folder.
 
-    The safety checks run in parallel (cfg.workers threads); the moves themselves
-    happen one at a time, in plan order, each written to the undo log before and
-    after. A file's kept copy is never moved earlier in the plan than the file
-    itself (load_plan guarantees this), so checking ahead of the moves is safe;
-    the kept copy's existence is checked once more right before each move."""
+    The safety checks run at the same time, on cfg.workers threads.
+    The moves run one at a time, in plan order. The undo log gets each move before and after it.
+    The plan never moves a kept copy before the file that it protects (load_plan makes sure of this).
+    Thus it is safe to do the checks before the moves.
+    Right before each move, the tool checks again that the kept copy is there."""
     res = DedupeResult()
     verifier = _Verifier(cfg)
     with Manifest(cfg, "dedupe", {"plan": csv_name}) as man:
         run_dir_rel = f"{cfg.quarantine_dir}/{man.run_id}"
         res.manifest = man.path
         res.quarantine_run = cfg.root / run_dir_rel
-        checks = parallel_map(lambda it: _precheck(cfg, verifier, it), plan.removals, cfg.workers,
-                              "Checking and moving duplicates to quarantine")
+
+        def check(item):
+            return _precheck(cfg, verifier, item)
+
+        checks = parallel_map(check, plan.removals, cfg.workers, "Checking and moving duplicates to quarantine")
         for item, problem, exc in checks:
             try:
                 if exc is not None:
@@ -239,10 +241,10 @@ def apply_plan(cfg: Config, plan: DedupePlan, index: Index | None = None, csv_na
 
 
 # ---------------------------------------------------------------------------
-# Remove the files named in a plain text list (e.g. downloaded movies)
+# Remove the files in a text list (for example downloaded movies)
 # ---------------------------------------------------------------------------
 def read_path_list(list_path: Path) -> list[str]:
-    """One path per line, relative to the disk root. Blank lines and # comments are ignored."""
+    """Read one path on each line, relative to the disk root. Ignore empty lines and # comments."""
     paths = []
     for line in list_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -252,8 +254,8 @@ def read_path_list(list_path: Path) -> list[str]:
 
 
 def quarantine_list(cfg: Config, paths: list[str], index: Index | None = None, list_name: str = "") -> DedupeResult:
-    """Move each listed file to the quarantine folder, with an undo log - the same
-    way duplicates are moved, but without a kept copy (you chose these yourself)."""
+    """Move each file in the list to the quarantine folder, with an undo log.
+    This is the same as for duplicates, but there is no kept copy (you chose these files)."""
     res = DedupeResult()
     with Manifest(cfg, "remove-list", {"list": list_name}) as man:
         run_dir_rel = f"{cfg.quarantine_dir}/{man.run_id}"
@@ -261,7 +263,7 @@ def quarantine_list(cfg: Config, paths: list[str], index: Index | None = None, l
         res.quarantine_run = cfg.root / run_dir_rel
         for rel in paths:
             try:
-                src = resolve_inside(cfg.root, rel)  # refuses paths outside the disk
+                src = resolve_inside(cfg.root, rel)  # this stops paths outside the disk
                 if rel.lower().startswith(cfg.quarantine_dir.lower() + "/"):
                     res.skipped.append(f"{rel}: already in quarantine")
                     continue

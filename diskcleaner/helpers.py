@@ -1,6 +1,4 @@
-"""Small shared helpers: logging, progress bars, sizes, and running work in parallel."""
-
-from __future__ import annotations
+"""Small helpers that many files use: the log, progress bars, file sizes and parallel work."""
 
 import datetime as dt
 import logging
@@ -14,7 +12,7 @@ except ImportError:  # pragma: no cover
     _tqdm = None
 
 log = logging.getLogger("diskcleaner")
-QUIET = False  # tests switch progress output off
+QUIET = False  # the tests set this to True to stop the progress output
 
 
 def setup_logging(state_dir: Path | None, verbose: bool = False) -> Path | None:
@@ -39,7 +37,8 @@ def setup_logging(state_dir: Path | None, verbose: bool = False) -> Path | None:
 # Progress
 # ---------------------------------------------------------------------------
 class _Plain:
-    """Progress without tqdm (or without a terminal): a line at 25/50/75/100%."""
+    """A simple progress display. It prints one line at 25%, 50%, 75% and 100%.
+    The tool uses it when tqdm is not installed or when there is no terminal."""
 
     def __init__(self, iterable=None, total=None, desc="", quiet=False):
         self.iterable, self.total, self.desc, self.quiet = iterable, total, desc, quiet
@@ -67,12 +66,13 @@ def progress(iterable=None, total=None, desc="", unit="file"):
 
 
 def parallel_map(fn, items, workers: int = 1, desc: str = ""):
-    """Run fn(item) for every item on `workers` threads, with a progress bar.
+    """Run fn(item) for each item. Use `workers` threads at the same time. Show a progress bar.
 
-    Yields (item, result, error) in the SAME ORDER as `items`, so results never
-    depend on timing. `error` is the exception if fn failed (result is then None).
-    Reading files and decoding images releases Python's lock, so threads really
-    run side by side. Only the caller (one thread) touches the database.
+    This gives (item, result, error) for each item, in the SAME ORDER as `items`.
+    Thus the results do not change with the timing of the threads.
+    If fn fails, result is None and error is the exception.
+    Threads help here, because file reads and image decodes release the Python lock.
+    Only the caller (one thread) writes to the database.
     """
     items = list(items)
     if not items:
@@ -81,7 +81,7 @@ def parallel_map(fn, items, workers: int = 1, desc: str = ""):
     def call(item):
         try:
             return fn(item), None
-        except Exception as exc:  # unreadable sector, truncated image, ...
+        except Exception as exc:  # for example a bad disk sector or a damaged image
             return None, exc
 
     bar = progress(total=len(items), desc=desc)
@@ -98,7 +98,7 @@ def parallel_map(fn, items, workers: int = 1, desc: str = ""):
     finally:
         bar.close()
         if pool is not None:
-            # On Ctrl+C: drop the queued work instead of waiting for all of it.
+            # If you push Ctrl+C, cancel the work that has not started yet.
             pool.shutdown(wait=True, cancel_futures=True)
 
 

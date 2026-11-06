@@ -3,15 +3,15 @@
 import builtins
 import sys
 
-from diskcleaner import hashing
-from diskcleaner.cli import main
+from diskcleaner import file_hashes
+from diskcleaner.commands import main
 
 
 def _contents(root):
     """Content hashes of the user's files (ignoring tool data, the hidden fixture
     and 0-byte files, which are deliberately never treated as duplicates)."""
     return sorted(
-        hashing.full_hash(p) for p in root.rglob("*")
+        file_hashes.full_hash(p) for p in root.rglob("*")
         if p.is_file() and p.stat().st_size and "_DiskCleaner" not in p.parts and ".hidden" not in p.parts
     )
 

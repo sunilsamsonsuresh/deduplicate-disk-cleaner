@@ -1,6 +1,4 @@
-"""Configuration: read config.toml, check every value, and give friendly errors."""
-
-from __future__ import annotations
+"""Read config.toml. Check each value. Give a clear error if a value is wrong."""
 
 import datetime as _dt
 import os
@@ -93,7 +91,7 @@ class Config:
             p.mkdir(parents=True, exist_ok=True)
 
     def always_excluded_relpaths(self) -> list[str]:
-        """Folders (relative to root) the scanner must never go into."""
+        """Give the folders (relative to the disk root) that the scan must not open."""
         out = [self.quarantine_dir.strip("/")]
         try:
             out.append(str(self.state_dir.resolve().relative_to(self.root.resolve())))
@@ -102,8 +100,8 @@ class Config:
         return out
 
 
-# Every simple setting: (toml section, toml key, Config attribute, type).
-# Defaults come from the Config class above, so they live in one place only.
+# Each simple setting: (section in the toml file, key, Config attribute, type).
+# The default values are in the Config class above. Thus each default is in one place only.
 SETTINGS = [
     ("disk", "include", "include", list),
     ("disk", "exclude", "exclude", list),
@@ -187,7 +185,7 @@ def load_config(path: str | os.PathLike, *, require_root_exists: bool = True) ->
     root = root.resolve() if root.exists() else root
 
     state_dir = Path(_check_type("dir", raw.get("state", {}).get("dir", "./state"), str)).expanduser()
-    if not state_dir.is_absolute():  # relative to the config file's folder
+    if not state_dir.is_absolute():  # a relative path starts at the folder of the config file
         state_dir = (path.parent / state_dir).resolve()
 
     # ---- every other setting -------------------------------------------

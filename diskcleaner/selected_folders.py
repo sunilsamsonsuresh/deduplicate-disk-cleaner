@@ -1,11 +1,10 @@
-"""Folder-by-folder scoping.
+"""Selected folders: work on one folder at a time.
 
-The whole disk is always indexed, so we can tell you *where else* a file
-exists. A scope only limits which files may be changed (removed / organized)
-in this run. Copies outside the scope are reported but never touched.
+The tool always indexes the whole disk. Thus it can tell you where the other
+copies of a file are. The selected folders (the "scope") only limit which files
+the tool can change (remove or organize) in this run. The tool shows copies
+outside these folders, but it does not touch them.
 """
-
-from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,7 +14,7 @@ from .config import Config, ConfigError
 
 @dataclass(frozen=True)
 class Scope:
-    folders: tuple[str, ...] = field(default_factory=tuple)  # relative to root, POSIX
+    folders: tuple[str, ...] = field(default_factory=tuple)  # relative to the disk root, with "/"
 
     @property
     def whole_disk(self) -> bool:
@@ -38,8 +37,8 @@ WHOLE_DISK = Scope()
 
 
 def resolve_scope(cfg: Config, folders: list[str] | None) -> Scope:
-    """Validate folder names (relative to the disk root, or absolute paths on it).
-    A typo must not silently mean 'nothing' or 'everything', so unknown folders are errors."""
+    """Check the folder names (relative to the disk root, or full paths on the disk).
+    A wrong name must not mean "nothing" or "the whole disk". Thus an unknown folder is an error."""
     if not folders:
         return WHOLE_DISK
     out: list[str] = []

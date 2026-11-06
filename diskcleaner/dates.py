@@ -1,25 +1,27 @@
-"""Working out *when* a file is from, and which existing folder names are
-meaningful "event" names worth keeping (e.g. "Goa Trip 2015")."""
-
-from __future__ import annotations
+"""Find the date of a file. Also find the folder names that are good event names
+(for example "Goa Trip 2015")."""
 
 import datetime as dt
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+# Month names (short and long) and their numbers.
 MONTHS = {
-    m: i + 1
-    for i, names in enumerate(
-        [
-            ("jan", "january"), ("feb", "february"), ("mar", "march"), ("apr", "april"),
-            ("may",), ("jun", "june"), ("jul", "july"), ("aug", "august"),
-            ("sep", "sept", "september"), ("oct", "october"), ("nov", "november"),
-            ("dec", "december"),
-        ]
-    )
-    for m in names
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
 }
+# All month names for the regular expressions below, longest first.
 _MONTH_RE = "|".join(sorted(MONTHS, key=len, reverse=True))
 
 
@@ -48,6 +50,7 @@ UNKNOWN = DateInfo(None, None, None, "unknown")
 
 
 def _valid(y: int, m: int | None = None, d: int | None = None, *, min_year: int, today: dt.date) -> bool:
+    """True if the date is possible: not before min_year and not after today."""
     if y < min_year or y > today.year:
         return False
     try:
@@ -69,11 +72,12 @@ _FN_YMD = re.compile(r"(?<!\d)((?:19|20)\d{2})[-_. ]?(0[1-9]|1[0-2])[-_. ]?(0[1-
 _FN_DMY = re.compile(r"(?<!\d)(0[1-9]|[12]\d|3[01])[-_.](0[1-9]|1[0-2])[-_.]((?:19|20)\d{2})(?!\d)")
 # Unix timestamps (seconds or milliseconds): 1434112200 / 1434112200000
 _FN_EPOCH = re.compile(r"^(?:fb_img_|received_|img_|image_|signal-)?(\d{10}|\d{13})$", re.I)
-# PhotoRec style f12345678 - the digits are disk sectors, NOT dates
+# PhotoRec names like f12345678. The digits are disk sectors, NOT dates.
 _PHOTOREC = re.compile(r"^[ft]\d{5,}$", re.I)
 
 
 def date_from_filename(name: str, *, min_year: int = 1990, today: dt.date | None = None) -> DateInfo | None:
+    """Find a date in the file name. Give None if there is no date."""
     today = today or dt.date.today()
     stem = PurePosixPath(name).stem
     if _PHOTOREC.match(stem):
@@ -111,8 +115,8 @@ _DIR_MONTH_ONLY = re.compile(r"^(0[1-9]|1[0-2])(?:[\s._-].*)?$")
 
 def date_from_folders(rel_parent: str, *, min_year: int = 1990, today: dt.date | None = None,
                       max_levels: int = 4) -> DateInfo | None:
-    """Look at the nearest folders (deepest first) for a year and optionally a month.
-    Handles 'Goa Trip 2015', '2015-06 Goa', 'June 2015', '2015/06', '2015/June'."""
+    """Find a year (and a month, if possible) in the nearest folder names, deepest first.
+    Examples: 'Goa Trip 2015', '2015-06 Goa', 'June 2015', '2015/06', '2015/June'."""
     today = today or dt.date.today()
     parts = [p for p in PurePosixPath(rel_parent).parts if p not in ("", ".", "/")]
     parts = parts[-max_levels:]
@@ -135,7 +139,7 @@ def date_from_folders(rel_parent: str, *, min_year: int = 1990, today: dt.date |
         if m and _valid(int(m.group(1)), min_year=min_year, today=today):
             y = int(m.group(1))
             mo = None
-            # "2015/06" or "2015/June" - month is the child folder
+            # "2015/06" or "2015/June": the month is the next folder down
             if idx + 1 < len(parts):
                 child = parts[idx + 1]
                 mm = _DIR_MONTH_ONLY.match(child)
@@ -185,7 +189,7 @@ _GENERIC_PATTERNS = [
 
 
 def clean_event_name(name: str) -> str:
-    """Strip dates/years and separators from a folder name: '2015-06 Goa Trip' -> 'Goa Trip'."""
+    """Remove dates, years and separators from a folder name: '2015-06 Goa Trip' -> 'Goa Trip'."""
     s = _FN_YMD.sub(" ", name)
     s = _DIR_MONTH_YEAR.sub(" ", s)
     s = _DIR_YEAR_MONTH.sub(" ", s)
@@ -194,11 +198,12 @@ def clean_event_name(name: str) -> str:
     s = re.sub(r"[_]+", " ", s)
     s = re.sub(r"\s+", " ", s)
     s = s.strip(" -_.,()[]")
-    s = re.sub(r"[\\/:*?\"<>|]", "", s)  # characters unsafe on FAT/NTFS
+    s = re.sub(r"[\\/:*?\"<>|]", "", s)  # remove characters that FAT and NTFS do not allow
     return s[:80].strip()
 
 
 def is_meaningful_folder(name: str, extra_generic: set[str] | frozenset[str] = frozenset()) -> bool:
+    """True if the folder name is a real name (an event), not a general name like "DCIM"."""
     low = name.strip().lower()
     if not low or low.startswith("."):
         return False
@@ -217,8 +222,8 @@ def is_meaningful_folder(name: str, extra_generic: set[str] | frozenset[str] = f
     return True
 
 
-# Folders that a camera / phone / date-sorting creates *inside* an event folder.
-# Event lookup may walk up through these, but stops at any other generic folder.
+# Folders that a camera, a phone or a date sort makes *inside* an event folder.
+# The event search can go up past these folders. It stops at all other general folders.
 _STRUCTURE_PATTERNS = [
     re.compile(r"^\d{3}[a-z_]{0,8}$", re.I),                 # 100CANON, 101APPLE
     re.compile(r"^(dcim|camera|camera roll|private|avchd|bdmv|stream|clip|misc)$", re.I),
@@ -233,9 +238,9 @@ def _is_structure_folder(name: str) -> bool:
 
 def event_name_for(rel_parent: str, extra_generic: set[str] | frozenset[str] = frozenset(),
                    max_levels: int = 4) -> str | None:
-    """Nearest meaningful folder name. Walks up through camera/date sub-folders
-    ('Goa Trip 2015/DCIM/100CANON' -> 'Goa Trip', 'Trip/2015/06' -> 'Trip') but not
-    through other generic folders ('My Laptop/New Folder' -> None)."""
+    """Give the nearest folder name that is a real event name.
+    The search goes up past camera and date folders ('Goa Trip 2015/DCIM/100CANON' -> 'Goa Trip',
+    'Trip/2015/06' -> 'Trip'). It stops at other general folders ('My Laptop/New Folder' -> None)."""
     parts = [p for p in PurePosixPath(rel_parent).parts if p not in ("", ".", "/")]
     for name in list(reversed(parts))[:max_levels]:
         if is_meaningful_folder(name, extra_generic):
@@ -246,7 +251,7 @@ def event_name_for(rel_parent: str, extra_generic: set[str] | frozenset[str] = f
 
 
 # ---------------------------------------------------------------------------
-# Resolution
+# Find the best date
 # ---------------------------------------------------------------------------
 def resolve_date(
     *,
@@ -260,6 +265,8 @@ def resolve_date(
     today: dt.date | None = None,
     ignore_mtime_dates: frozenset[dt.date] | set[dt.date] = frozenset(),
 ) -> DateInfo:
+    """Find the best date for a file. Use the first source that has a date:
+    1. metadata (EXIF or video), 2. file name, 3. folder names, 4. modified time."""
     today = today or dt.date.today()
     p = PurePosixPath(rel_path)
     if meta_date:

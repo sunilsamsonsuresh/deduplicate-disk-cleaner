@@ -1,12 +1,10 @@
-"""Command line interface.
+"""The commands that you type.
 
     python -m diskcleaner [-c config.toml] <command> [options]
 
-Every command that changes files is a dry run unless --apply is given, and then
-asks you to type a confirmation word.
+A command that changes files first only shows what it will do (a "dry run").
+To make the change, add --apply. Then the command asks you to type a word to confirm.
 """
-
-from __future__ import annotations
 
 import argparse
 import datetime as dt
@@ -16,26 +14,28 @@ import sys
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
-from . import __version__, organizer, reports, utils
+from . import __version__, organize, reports, helpers
 from .config import Config, ConfigError, load_config
-from .dedupe import apply_plan as dedupe_apply
-from .dedupe import load_plan as dedupe_load
-from .dedupe import quarantine_list, read_path_list
-from .duplicates import compute_hashes, exact_groups, find_duplicates
-from .filetypes import DECODABLE_IMAGE_EXT
-from .index import FileRow, Index
-from .scope import WHOLE_DISK, Scope, resolve_scope
-from .safeops import SafetyError, check_writable, list_manifests, read_manifest, undo
-from .scanner import scan
-from .utils import human_size, timestamp
+from .remove_duplicates import apply_plan as dedupe_apply
+from .remove_duplicates import load_plan as dedupe_load
+from .remove_duplicates import quarantine_list, read_path_list
+from .find_duplicates import compute_hashes, exact_groups, find_duplicates
+from .file_types import DECODABLE_IMAGE_EXT
+from .file_index import FileRow, Index
+from .selected_folders import WHOLE_DISK, Scope, resolve_scope
+from .safe_moves import SafetyError, check_writable
+from .undo_log import list_manifests, read_manifest, undo
+from .scan_disk import scan
+from .helpers import human_size, timestamp
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 
 # ---------------------------------------------------------------------------
-# helpers
+# small helpers
 # ---------------------------------------------------------------------------
 def confirm(prompt: str, word: str, assume_yes: bool = False) -> bool:
+    """Ask the user to type `word`. Give True only if they type it."""
     if assume_yes:
         return True
     if not sys.stdin.isatty():
@@ -49,11 +49,13 @@ def confirm(prompt: str, word: str, assume_yes: bool = False) -> bool:
 
 
 def _latest(directory: Path, pattern: str) -> Path | None:
+    """Give the newest file that matches pattern, or None."""
     files = sorted(directory.glob(pattern))
     return files[-1] if files else None
 
 
 def _print_scan(res) -> None:
+    """Print the result of a scan."""
     print(f"Scanned {res.files_seen:,} files in {res.seconds:.0f}s "
           f"({res.new_or_changed:,} new/changed, {res.removed_from_index:,} gone since last scan).")
     if res.metadata_read or res.metadata_errors:
@@ -67,7 +69,7 @@ def _print_scan(res) -> None:
     if res.walk_errors:
         print(f"{len(res.walk_errors):,} files/folders could not be read (see log).")
         for e in res.walk_errors:
-            utils.log.debug("walk error: %s", e)
+            helpers.log.debug("walk error: %s", e)
 
 
 def _do_scan(cfg: Config, index: Index) -> None:
@@ -76,6 +78,7 @@ def _do_scan(cfg: Config, index: Index) -> None:
 
 
 def _resolve_manifest(cfg: Config, name: str) -> Path:
+    """Find an undo log from a name, a path or 'last'."""
     if name == "last":
         ms = [m for m in list_manifests(cfg) if not m.stem.split("_", 2)[-1].startswith("undo")]
         if not ms:
@@ -152,7 +155,7 @@ def cmd_status(cfg: Config, args) -> int:
 
 
 def _scope_from_args(cfg: Config, args) -> Scope:
-    """--folder on the command line wins; otherwise [scope].folders from the config."""
+    """Use --folder from the command line. If there is no --folder, use [scope].folders from the config."""
     folders = getattr(args, "folder", None) or cfg.scope_folders
     return resolve_scope(cfg, folders)
 
@@ -174,7 +177,7 @@ def cmd_duplicates(cfg: Config, args) -> int:
     reports.write_duplicates_html(result, cfg, html_path, csv_path)
     reports.write_duplicates_json(result, cfg, json_path, csv_path)
     for e in result.read_errors:
-        utils.log.debug("read error: %s", e)
+        helpers.log.debug("read error: %s", e)
     reports.print_summary(result)
     bad = reports.unreadable_paths(result)
     if bad:
@@ -190,7 +193,7 @@ def cmd_duplicates(cfg: Config, args) -> int:
 
 
 def _report_scope(cfg: Config, csv_path: Path) -> Scope | None:
-    """The folders a duplicates report was made for (from its JSON twin)."""
+    """Give the folders that a duplicates report was made for (from its JSON file)."""
     j = csv_path.with_suffix(".json")
     if not j.exists():
         return None
@@ -202,7 +205,7 @@ def _report_scope(cfg: Config, csv_path: Path) -> Scope | None:
     try:
         return resolve_scope(cfg, folders)
     except ConfigError:
-        return None  # a folder has since been moved/renamed; fall back to the CSV as-is
+        return None  # a folder was moved or renamed after the report. Use the CSV as it is.
 
 
 def cmd_dedupe(cfg: Config, args) -> int:
@@ -316,7 +319,7 @@ def cmd_remove_list(cfg: Config, args) -> int:
 
 
 def cmd_folders(cfg: Config, args) -> int:
-    """Overview of folders to help pick what to clean first."""
+    """Show the folders, to help you choose what to clean first."""
     scope = _scope_from_args(cfg, args)
     with Index(cfg.db_path) as index:
         if not args.no_rescan:
@@ -378,7 +381,11 @@ def cmd_where(cfg: Config, args) -> int:
         if row is None:
             print("This file is not in the index yet - run `scan` first.")
             return 1
-        others = lambda sql, *args: [FileRow.from_row(r) for r in index.conn.execute(sql, (*args, rel))]
+
+        def others(sql, *values):
+            # the other files that match the query (never the file itself)
+            return [FileRow.from_row(r) for r in index.conn.execute(sql, (*values, rel))]
+
         same_size = others("SELECT * FROM files WHERE size=? AND path<>?", row.size)
         compute_hashes(cfg, index, [row, *same_size], "full_hash", errors, "Comparing files")
         exact = [o for o in same_size if row.full_hash and o.full_hash == row.full_hash]
@@ -391,7 +398,12 @@ def cmd_where(cfg: Config, args) -> int:
             compute_hashes(cfg, index, [row, *same_dim], "pixel_hash", errors, "Comparing pictures")
             pixel = [o for o in same_dim if row.pixel_hash and o.pixel_hash == row.pixel_hash]
     q = cfg.quarantine_dir.lower() + "/"
-    label = lambda o: o.path + ("   (in quarantine)" if o.path.lower().startswith(q) else "")
+
+    def label(o):
+        if o.path.lower().startswith(q):
+            return o.path + "   (in quarantine)"
+        return o.path
+
     print(f"{rel}  ({human_size(row.size)})")
     if not exact and not pixel:
         print("  No other copy found on the disk.")
@@ -410,10 +422,10 @@ def cmd_organize(cfg: Config, args) -> int:
                 _do_scan(cfg, index)
             scope = _scope_from_args(cfg, args)
             print(f"Planning for: {scope.label()}")
-            items = organizer.build_plan(cfg, index, scope)
+            items = organize.build_plan(cfg, index, scope)
         path = cfg.reports_dir / f"organize_{timestamp()}.csv"
-        organizer.write_plan_csv(items, path)
-        s = organizer.plan_summary(items)
+        organize.write_plan_csv(items, path)
+        s = organize.plan_summary(items)
         print(f"\nOrganize plan: {s['files']:,} files -> {cfg.organize_path}")
         print("How each file was dated:")
         for src, n in s["by_source"].most_common():
@@ -430,7 +442,7 @@ def cmd_organize(cfg: Config, args) -> int:
     if not plan_path or not plan_path.exists():
         print("No organize plan found - run `organize` (without --apply) first.")
         return 1
-    items = organizer.read_plan_csv(plan_path)
+    items = organize.read_plan_csv(plan_path)
     mode = args.mode or cfg.organize_mode
     if not items:
         print("Plan is empty.")
@@ -444,7 +456,7 @@ def cmd_organize(cfg: Config, args) -> int:
         print("Cancelled. Nothing was changed.")
         return 1
     with Index(cfg.db_path) as index:
-        res = organizer.apply_plan(cfg, items, index, mode, plan_path.name)
+        res = organize.apply_plan(cfg, items, index, mode, plan_path.name)
     print(f"\n{mode.title()}d {res.done:,} files.")
     if res.skipped:
         print(f"Skipped {len(res.skipped):,}:")
@@ -519,7 +531,7 @@ def cmd_purge(cfg: Config, args) -> int:
 
 
 def cmd_clean_empty_dirs(cfg: Config, args) -> int:
-    dirs = organizer.find_empty_dirs(cfg)
+    dirs = organize.find_empty_dirs(cfg)
     if not dirs:
         print("No empty folders.")
         return 0
@@ -534,7 +546,7 @@ def cmd_clean_empty_dirs(cfg: Config, args) -> int:
     if not confirm(f"Remove {len(dirs):,} empty folders?", "yes", args.yes):
         print("Cancelled.")
         return 1
-    print(f"Removed {organizer.remove_empty_dirs(dirs):,} folders.")
+    print(f"Removed {organize.remove_empty_dirs(dirs):,} folders.")
     return 0
 
 
@@ -618,7 +630,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = load_config(args.config)
         cfg.ensure_state_dirs()
-        utils.setup_logging(cfg.state_dir, args.verbose)
+        helpers.setup_logging(cfg.state_dir, args.verbose)
         return COMMANDS[args.command](cfg, args)
     except (ConfigError, SafetyError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

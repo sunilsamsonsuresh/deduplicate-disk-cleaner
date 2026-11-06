@@ -1,15 +1,14 @@
-"""File type classification by extension."""
-
-from __future__ import annotations
+"""Find the type of a file (photo, video, audio and so on) from its extension."""
 
 PHOTO_EXT = {
     ".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".gif", ".bmp", ".tif", ".tiff",
     ".webp", ".heic", ".heif", ".avif",
-    # RAW formats (dated by filename/folder/mtime; exact-duplicate detection only)
+    # RAW camera files. The tool finds only exact copies of these files.
+    # It dates them by file name, folder name or modified time.
     ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".arw", ".srf", ".sr2", ".dng", ".orf",
     ".rw2", ".raf", ".pef", ".srw", ".3fr", ".kdc", ".mrw", ".x3f",
 }
-# Images Pillow can decode for pixel / perceptual hashing.
+# Images that Pillow can open. The tool compares the pixels of these images.
 DECODABLE_IMAGE_EXT = {
     ".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".gif", ".bmp", ".tif", ".tiff",
     ".webp", ".heic", ".heif", ".avif",
@@ -18,7 +17,7 @@ VIDEO_EXT = {
     ".mp4", ".m4v", ".mov", ".qt", ".3gp", ".3g2", ".avi", ".mkv", ".wmv", ".mpg",
     ".mpeg", ".mts", ".m2ts", ".ts", ".flv", ".webm", ".vob", ".mod", ".tod", ".dv",
 }
-# ISO base media containers whose 'mvhd' atom we can read a creation date from.
+# Video files that can hold a creation date (in the 'mvhd' part of the file).
 MP4_FAMILY_EXT = {".mp4", ".m4v", ".mov", ".qt", ".3gp", ".3g2", ".m4a"}
 AUDIO_EXT = {
     ".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".oga", ".wma", ".aiff", ".aif",
@@ -57,7 +56,7 @@ def category_for(ext: str) -> str:
 
 
 # Recovered files often lose their extension ("sector2538737", "FILE0001.CHK").
-# For these we look at the first bytes to find out what they really are.
+# For these files, the tool reads the first bytes to find the real type.
 SNIFF_EXT = {"", ".chk", ".tmp", ".bin", ".dat", ".000", ".rec"}
 _FTYP_BRANDS = {
     b"heic": ".heic", b"heix": ".heic", b"hevc": ".heic", b"mif1": ".heic", b"msf1": ".heic",
@@ -66,7 +65,7 @@ _FTYP_BRANDS = {
 
 
 def sniff_ext(head: bytes) -> str | None:
-    """Real extension from a file's first 16 bytes, or None if unknown."""
+    """Give the real extension from the first 16 bytes of a file. Give None if the type is not known."""
     if head[:3] == b"\xff\xd8\xff":
         return ".jpg"
     if head[:8] == b"\x89PNG\r\n\x1a\n":

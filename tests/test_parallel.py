@@ -4,11 +4,11 @@ import time
 
 import pytest
 
-from diskcleaner import reports, utils
+from diskcleaner import reports, helpers
 from diskcleaner.config import ConfigError, load_config
-from diskcleaner.duplicates import find_duplicates
-from diskcleaner.index import Index
-from diskcleaner.scanner import scan
+from diskcleaner.find_duplicates import find_duplicates
+from diskcleaner.file_index import Index
+from diskcleaner.scan_disk import scan
 from tests.conftest import write_config
 
 
@@ -19,12 +19,12 @@ def test_parallel_map_keeps_order_and_reports_errors():
             raise ValueError("bad sector")
         return n * n
 
-    out = list(utils.parallel_map(work, range(10), workers=4))
+    out = list(helpers.parallel_map(work, range(10), workers=4))
     assert [item for item, _, _ in out] == list(range(10))
     assert [v for _, v, e in out if e is None] == [n * n for n in range(10) if n != 3]
     (bad,) = [e for _, _, e in out if e is not None]
     assert isinstance(bad, ValueError)
-    assert list(utils.parallel_map(work, [], workers=4)) == []
+    assert list(helpers.parallel_map(work, [], workers=4)) == []
 
 
 def _config(folder, root, extra=""):
@@ -96,7 +96,7 @@ def test_different_disk_starts_fresh(disk, tmp_path):
 
 def test_file_left_out_of_listing_is_not_forgotten(disk, tmp_path, monkeypatch):
     """Some NTFS drivers drop the odd file from folder listings; it is still there."""
-    from diskcleaner import scanner
+    from diskcleaner import scan_disk
 
     root, cfg_path = disk
     cfg = load_config(cfg_path)
@@ -105,8 +105,8 @@ def test_file_left_out_of_listing_is_not_forgotten(disk, tmp_path, monkeypatch):
     before = Index(cfg.db_path).get(hidden)
     assert before.full_hash
 
-    real = scanner._list_files
-    monkeypatch.setattr(scanner, "_list_files", lambda c, e: [p for p in real(c, e) if p != hidden])
+    real = scan_disk._list_files
+    monkeypatch.setattr(scan_disk, "_list_files", lambda c, e: [p for p in real(c, e) if p != hidden])
     (root / "Docs/report.pdf").unlink()  # really deleted: must be forgotten
     with Index(cfg.db_path) as idx:
         res = scan(cfg, idx)

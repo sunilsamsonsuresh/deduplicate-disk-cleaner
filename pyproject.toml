@@ -16,7 +16,7 @@ progress = ["tqdm>=4.66"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
-diskcleaner = "diskcleaner.cli:main"
+diskcleaner = "diskcleaner.commands:main"
 
 [tool.setuptools]
 packages = ["diskcleaner"]

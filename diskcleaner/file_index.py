@@ -1,11 +1,10 @@
-"""SQLite index of the files on the disk.
+"""The index: a SQLite database with one row for each file on the disk.
 
-Paths are stored relative to the disk root (POSIX style) so the index keeps
-working if the disk is mounted under a different name.
-Hashes and metadata are cached and only recomputed when size or mtime change.
+The paths are relative to the disk root (with "/" between folders).
+Thus the index stays correct if the disk gets a different mount name.
+The index keeps the hashes and the metadata. The tool calculates them again
+only when the size or the modified time of a file changes.
 """
-
-from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
@@ -109,8 +108,8 @@ class Index:
         return [FileRow.from_row(r) for r in self.conn.execute("SELECT * FROM files ORDER BY path")]
 
     def upsert_stat(self, path: str, size: int, mtime_ns: int, ext: str, category: str, scan_id: int) -> bool:
-        """Insert/refresh a file's stat info. Returns True if the file is new or changed
-        (cached hashes/metadata were invalidated)."""
+        """Add or update the size and the time of a file.
+        Return True if the file is new or changed. Then its old hashes and metadata are removed."""
         cur = self.conn.execute("SELECT size, mtime_ns, ext FROM files WHERE path=?", (path,)).fetchone()
         if cur and cur["size"] == size and cur["mtime_ns"] == mtime_ns and cur["ext"] == ext:
             self.conn.execute("UPDATE files SET scan_id=? WHERE path=?", (scan_id, path))
@@ -139,7 +138,7 @@ class Index:
         return cur.rowcount
 
     def rename(self, old: str, new: str) -> None:
-        """Keep cached hashes/metadata when a file is moved (rename keeps size & mtime)."""
+        """Change the path of a moved file. Keep its hashes and metadata (a move does not change the content)."""
         self.conn.execute("DELETE FROM files WHERE path=?", (new,))
         self.conn.execute("UPDATE files SET path=? WHERE path=?", (new, old))
 

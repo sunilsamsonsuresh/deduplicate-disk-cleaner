@@ -1,6 +1,6 @@
-from diskcleaner.duplicates import KEEP, REMOVE, REVIEW, BKTree, find_duplicates
-from diskcleaner.index import Index
-from diskcleaner.scanner import scan
+from diskcleaner.find_duplicates import KEEP, REMOVE, REVIEW, BKTree, find_duplicates
+from diskcleaner.file_index import Index
+from diskcleaner.scan_disk import scan
 
 
 def _run(cfg):

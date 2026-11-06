@@ -1,7 +1,5 @@
-"""Media metadata: image dimensions, EXIF dates, pixel hash, perceptual hash,
-and MP4/MOV creation time (parsed natively, no ffmpeg needed)."""
-
-from __future__ import annotations
+"""Read information from photos and videos: the size in pixels, the EXIF date,
+the pixel hash, the look-alike hash and the MP4/MOV creation date (no ffmpeg needed)."""
 
 import datetime as dt
 import hashlib
@@ -11,13 +9,13 @@ from pathlib import Path
 
 try:
     from PIL import Image, ImageOps
-    Image.MAX_IMAGE_PIXELS = 400_000_000  # allow big panoramas, still guard against bombs
+    Image.MAX_IMAGE_PIXELS = 400_000_000  # allow big panoramas, but stop "image bombs"
     warnings.simplefilter("ignore", Image.DecompressionBombWarning)
     PIL_AVAILABLE = True
 except ImportError:  # pragma: no cover
     PIL_AVAILABLE = False
 
-try:  # optional HEIC/HEIF support (iPhone photos)
+try:  # HEIC/HEIF (iPhone photos) works only if pillow-heif is installed
     from pillow_heif import register_heif_opener
 
     register_heif_opener()
@@ -25,7 +23,7 @@ try:  # optional HEIC/HEIF support (iPhone photos)
 except Exception:  # pragma: no cover
     HEIF_AVAILABLE = False
 
-from .filetypes import DECODABLE_IMAGE_EXT, MP4_FAMILY_EXT
+from .file_types import DECODABLE_IMAGE_EXT, MP4_FAMILY_EXT
 
 EXIF_IFD = 0x8769
 TAG_DATETIME_ORIGINAL = 36867
@@ -33,7 +31,17 @@ TAG_DATETIME_DIGITIZED = 36868
 TAG_DATETIME = 306
 
 
+# The EXIF date formats that the tool knows, and the length of each one.
+EXIF_DATE_FORMATS = [
+    ("%Y:%m:%d %H:%M:%S", 19),
+    ("%Y-%m-%d %H:%M:%S", 19),
+    ("%Y:%m:%d %H:%M", 16),
+    ("%Y:%m:%d", 10),
+]
+
+
 def parse_exif_datetime(value) -> dt.datetime | None:
+    """Change an EXIF date text ("2015:06:12 10:30:00") to a datetime. Give None if it is not a date."""
     if value is None:
         return None
     if isinstance(value, bytes):
@@ -41,16 +49,16 @@ def parse_exif_datetime(value) -> dt.datetime | None:
     s = str(value).strip().replace("\x00", "")
     if not s or s.startswith("0000"):
         return None
-    for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y:%m:%d %H:%M", "%Y:%m:%d"):
+    for fmt, length in EXIF_DATE_FORMATS:
         try:
-            return dt.datetime.strptime(s[: len(dt.datetime(2000, 1, 1).strftime(fmt))], fmt)
+            return dt.datetime.strptime(s[:length], fmt)
         except ValueError:
             continue
     return None
 
 
 def image_info(path: Path) -> dict:
-    """Read dimensions and EXIF date from the image header (no full decode)."""
+    """Read the size and the EXIF date from the start of the image. (The tool does not open the full image.)"""
     out = {"width": None, "height": None, "date": None, "has_exif": False}
     if not PIL_AVAILABLE:
         return out
@@ -59,7 +67,7 @@ def image_info(path: Path) -> dict:
         exif = im.getexif()
         if exif:
             out["has_exif"] = True
-            # EXIF orientation 5-8 = rotated 90/270 -> report displayed size
+            # EXIF orientation 5 to 8: the photo is turned 90 or 270 degrees. Give the size as shown.
             if exif.get(0x0112) in (5, 6, 7, 8):
                 w, h = h, w
             sub = {}
@@ -79,6 +87,7 @@ def image_info(path: Path) -> dict:
 
 
 def _open_upright(path: Path):
+    """Open an image and turn it upright (from the EXIF orientation)."""
     im = Image.open(path)
     try:
         im = ImageOps.exif_transpose(im)
@@ -88,7 +97,7 @@ def _open_upright(path: Path):
 
 
 def pixel_hash(path: Path) -> str:
-    """Hash of the fully decoded, orientation-corrected RGB(A) pixels.
+    """Make a hash from all the pixels of the image, after the tool turns it upright.
     Two files with the same pixel hash show exactly the same picture."""
     with _open_upright(path) as im:
         mode = "RGBA" if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info else "RGB"
@@ -100,11 +109,12 @@ def pixel_hash(path: Path) -> str:
 
 
 def dhash128(path: Path) -> str:
-    """128-bit difference hash (64 horizontal + 64 vertical gradient bits) as hex.
-    Robust to resizing, recompression and small colour changes."""
+    """Make a 128-bit "look-alike" hash (a difference hash), as hex text.
+    It compares the brightness of pixels next to each other, on a small grey copy.
+    It stays almost the same when a photo is resized, saved again or changed a little in colour."""
     with Image.open(path) as im:
         try:
-            im.draft("L", (64, 64))  # JPEG: decode at reduced scale - much faster
+            im.draft("L", (64, 64))  # for JPEG, open a small version. This is much faster.
         except Exception:
             pass
         try:
@@ -127,6 +137,7 @@ def dhash128(path: Path) -> str:
 
 
 def hamming(a: str, b: str) -> int:
+    """Count the bits that are different between two hex hashes."""
     return (int(a, 16) ^ int(b, 16)).bit_count()
 
 
@@ -138,6 +149,7 @@ _CONTAINERS = {b"moov", b"trak", b"mdia"}
 
 
 def _iter_atoms(fh, start: int, end: int):
+    """Give (type, body start, end) for each part ("atom") of an MP4 file between start and end."""
     pos = start
     while pos + 8 <= end:
         fh.seek(pos)
@@ -161,7 +173,7 @@ def _iter_atoms(fh, start: int, end: int):
 
 
 def video_creation_date(path: Path) -> dt.datetime | None:
-    """Creation time from the 'mvhd' (movie header) atom; None if absent or zero."""
+    """Read the creation time from the 'mvhd' part (the movie header). Give None if it is not there or is zero."""
     with open(path, "rb") as fh:
         fh.seek(0, 2)
         file_end = fh.tell()
@@ -175,7 +187,7 @@ def video_creation_date(path: Path) -> dt.datetime | None:
                 version = fh.read(1)
                 if not version:
                     return None
-                fh.read(3)  # flags
+                fh.read(3)  # skip the 3 flag bytes
                 if version[0] == 1:
                     data = fh.read(8)
                     if len(data) < 8:
@@ -197,7 +209,7 @@ def video_creation_date(path: Path) -> dt.datetime | None:
 
 
 def extract_metadata(path: Path, ext: str) -> dict:
-    """Return {'width','height','date','date_source','has_exif'}; raises on unreadable files."""
+    """Give {'width', 'height', 'date', 'date_source', 'has_exif'}. Raise an error if the file cannot be read."""
     ext = ext.lower()
     out = {"width": None, "height": None, "date": None, "date_source": None, "has_exif": False}
     if ext in DECODABLE_IMAGE_EXT and PIL_AVAILABLE:

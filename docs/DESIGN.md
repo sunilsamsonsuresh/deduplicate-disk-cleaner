@@ -100,17 +100,22 @@ clean-empty-dirs   remove folders left empty
 
 ```
 diskcleaner/
-  config.py      TOML config loading + validation + defaults
-  index.py       SQLite index (relative paths, cached hashes/metadata)
-  scanner.py     filesystem walk, metadata extraction, incremental updates
-  hashing.py     partial/full file hashes
-  media.py       image dims, EXIF dates, pixel hash, dHash, MP4 date parsing
-  dates.py       filename/folder date parsing, event-name detection, date resolution
-  duplicates.py  tiered grouping, keeper scoring, BK-tree
-  reports.py     CSV / HTML / console summaries
-  safeops.py     verified moves, manifests, quarantine, undo, purge
-  organizer.py   plan + apply
-  cli.py         argparse CLI, confirmations
+  commands.py           argparse commands, confirmations
+  config.py             TOML config loading + validation + defaults
+  scan_disk.py          filesystem walk, metadata extraction, incremental updates
+  file_index.py         SQLite index (relative paths, cached hashes/metadata)
+  file_types.py         file type from the extension (and from the first bytes)
+  file_hashes.py        partial/full file hashes
+  media_info.py         image size, EXIF dates, pixel hash, dHash, MP4 date parsing
+  dates.py              filename/folder date parsing, event names, date resolution
+  find_duplicates.py    tiered grouping, keeper scoring, BK-tree
+  reports.py            JSON / CSV / HTML / console summaries
+  remove_duplicates.py  verified quarantine moves (from the CSV or from a text list)
+  organize.py           organize plan + apply, empty-folder clean-up
+  selected_folders.py   folder-by-folder scope
+  safe_moves.py         never-overwrite moves, verified copies, path guards
+  undo_log.py           JSONL manifests (undo logs) and undo
+  helpers.py            logging, progress bars, sizes, parallel_map
 ```
 
 State (index DB, reports, manifests) lives in `state_dir` (default `./state` in the

@@ -1,37 +1,35 @@
-"""Tiered duplicate detection and keeper selection.
+"""Find duplicate files in three levels ("tiers"), and choose the copy to keep.
 
-Tier 1  exact    byte-identical (size -> partial hash -> full BLAKE2b hash)
-Tier 2  pixel    images whose decoded pixels are identical (metadata differs)
-Tier 3  similar  perceptually similar images (dHash + BK-tree), REVIEW by default
+Tier 1  exact    the bytes are the same (size -> quick hash -> full BLAKE2b hash)
+Tier 2  pixel    images with the same pixels (only the metadata is different)
+Tier 3  similar  images that look the same (look-alike hash + BK-tree). Default: REVIEW
 
-Each tier only sees the *keepers* of the previous tier, so one file is never
-proposed for removal by two tiers.
+Each tier looks only at the kept copies ("keepers") from the tier before it.
+Thus two tiers never both propose to remove the same file.
 """
-
-from __future__ import annotations
 
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
-from . import hashing, media
+from . import file_hashes, media_info
 from .config import Config
 from .dates import is_meaningful_folder
-from .filetypes import DECODABLE_IMAGE_EXT
-from .index import FileRow, Index
-from .scope import WHOLE_DISK, Scope
-from .utils import log, parallel_map
+from .file_types import DECODABLE_IMAGE_EXT
+from .file_index import FileRow, Index
+from .selected_folders import WHOLE_DISK, Scope
+from .helpers import log, parallel_map
 
 KEEP, REMOVE, REVIEW = "KEEP", "REMOVE", "REVIEW"
-# Copy lies outside the selected folders: reported, but not touched in this run.
+# The copy is outside the selected folders. The report shows it, but this run does not touch it.
 SKIP = "SKIP"
 
 _GENERIC_NAME = [
     re.compile(r"^[ft]\d{5,}$", re.I),                  # PhotoRec f12345678
     re.compile(r"^file\d+$", re.I),                     # FILE0001 (chkdsk)
-    re.compile(r"^sector\d+$", re.I),                   # sector255116120 (sector-carved)
-    re.compile(r"^_+"),                                 # _MG_1234 deleted-file markers
+    re.compile(r"^sector\d+$", re.I),                   # sector255116120 (recovered from disk sectors)
+    re.compile(r"^_+"),                                 # _MG_1234 (marks a deleted file)
     re.compile(r".*\s\(\d+\)$"),                        # "IMG_1 (1)"
     re.compile(r".*[\s_-]copy(\s?\(?\d+\)?)?$", re.I),  # "IMG_1 - Copy", "IMG_1_copy2"
     re.compile(r"^copy of ", re.I),
@@ -45,7 +43,7 @@ class Member:
     action: str = KEEP
     score: int = 0
     reasons: list[str] = field(default_factory=list)
-    distance: int | None = None  # similar tier: Hamming distance to keeper
+    distance: int | None = None  # "similar" tier only: the number of different bits from the keeper
     in_scope: bool = True
 
     @property
@@ -80,9 +78,10 @@ class DuplicateResult:
 
 
 # ---------------------------------------------------------------------------
-# Keeper scoring
+# Choose the copy to keep
 # ---------------------------------------------------------------------------
 def path_score(rel: str, cfg: Config) -> tuple[int, list[str]]:
+    """Give points to a path. A higher score means "a better copy to keep". Also give the reasons."""
     score, why = 0, []
     low = "/" + rel.lower()
     for pat in cfg.low_priority_patterns:
@@ -108,7 +107,24 @@ def path_score(rel: str, cfg: Config) -> tuple[int, list[str]]:
     return score, why
 
 
+def _order_exact(m: Member):
+    # best score first, then the oldest file, then the shortest path
+    return (-m.score, m.row.mtime_ns, len(m.path), m.path)
+
+
+def _order_pixel(m: Member):
+    # Same pixels: only the metadata is different. Thus the copy with EXIF
+    # (date taken, camera, GPS) always wins. The score decides between copies with EXIF.
+    return (not m.row.has_exif, -m.score, -m.row.size, len(m.path), m.path)
+
+
+def _order_similar(m: Member):
+    # Look-alike images: always keep the biggest picture
+    return (-m.row.pixels, -m.score, -m.row.size, len(m.path), m.path)
+
+
 def _choose_keeper(members: list[Member], tier: str, cfg: Config) -> None:
+    """Sort the members, best copy first. Mark the first one KEEP and all others REMOVE."""
     for m in members:
         m.score, m.reasons = path_score(m.path, cfg)
         if m.row.has_exif and tier in ("pixel", "similar"):
@@ -116,37 +132,41 @@ def _choose_keeper(members: list[Member], tier: str, cfg: Config) -> None:
             if tier == "similar":
                 m.score += 8
     if tier == "exact":
-        key = lambda m: (-m.score, m.row.mtime_ns, len(m.path), m.path)
+        members.sort(key=_order_exact)
     elif tier == "pixel":
-        # Same pixels: the only real difference is the metadata, so the copy that
-        # still has EXIF (date taken, camera, GPS) always wins; location breaks ties.
-        key = lambda m: (not m.row.has_exif, -m.score, -m.row.size, len(m.path), m.path)
-    else:  # similar: never throw away resolution
-        key = lambda m: (-m.row.pixels, -m.score, -m.row.size, len(m.path), m.path)
-    members.sort(key=key)
+        members.sort(key=_order_pixel)
+    else:
+        members.sort(key=_order_similar)
     for i, m in enumerate(members):
         m.action = KEEP if i == 0 else REMOVE
 
 
 # ---------------------------------------------------------------------------
-# Hashes, cached in the index
+# Hashes (the index keeps them)
 # ---------------------------------------------------------------------------
-HASHERS = {
-    "partial_hash": lambda path, row: hashing.partial_hash(path, row.size),
-    "full_hash": lambda path, row: hashing.full_hash(path),
-    "pixel_hash": lambda path, row: media.pixel_hash(path),
-    "dhash": lambda path, row: media.dhash128(path),
-}
+def make_hash(column: str, path, row: FileRow) -> str:
+    """Calculate one hash of a file. `column` is the name of the hash in the index."""
+    if column == "partial_hash":
+        return file_hashes.partial_hash(path, row.size)
+    if column == "full_hash":
+        return file_hashes.full_hash(path)
+    if column == "pixel_hash":
+        return media_info.pixel_hash(path)
+    if column == "dhash":
+        return media_info.dhash128(path)
+    raise ValueError(f"unknown hash: {column}")
 
 
 def compute_hashes(cfg: Config, index: Index, rows: list[FileRow], column: str,
                    errors: list[str], desc: str = "") -> None:
-    """Fill row.<column> for every row. Values already in the index are reused;
-    missing ones are computed on cfg.workers threads and saved to the index.
-    Rows that cannot be read keep None and are listed in `errors`."""
-    hasher = HASHERS[column]
+    """Fill row.<column> for each row. Use the value from the index if it is there.
+    Calculate the missing values on cfg.workers threads and save them in the index.
+    If the tool cannot read a file, the value stays None and the error goes into `errors`."""
     todo = [r for r in rows if not getattr(r, column)]
-    work = lambda r: hasher(cfg.root / r.path, r)
+
+    def work(row):
+        return make_hash(column, cfg.root / row.path, row)
+
     for i, (row, value, exc) in enumerate(parallel_map(work, todo, cfg.workers, desc)):
         if exc is not None:
             errors.append(f"{row.path}: {type(exc).__name__}: {exc}")
@@ -160,7 +180,7 @@ def compute_hashes(cfg: Config, index: Index, rows: list[FileRow], column: str,
 
 
 def _buckets(rows, key) -> list[list[FileRow]]:
-    """Group rows by key(row); only groups with 2+ rows. Rows whose key is None are dropped."""
+    """Put the rows in groups by key(row). Give only groups with 2 or more rows. Ignore rows with key None."""
     out: dict = defaultdict(list)
     for r in rows:
         k = key(r)
@@ -173,8 +193,11 @@ def _buckets(rows, key) -> list[list[FileRow]]:
 # BK-tree for Hamming-distance search
 # ---------------------------------------------------------------------------
 class BKTree:
+    """A search tree for hashes. It quickly finds all hashes with few different bits.
+    Each node is [hash as a number, row number, {distance: child node}]."""
+
     def __init__(self):
-        self.root = None  # (value_int, idx, children{dist: node})
+        self.root = None
 
     def add(self, value: int, idx: int) -> None:
         node = [value, idx, {}]
@@ -204,6 +227,8 @@ class BKTree:
 
 
 class _UnionFind:
+    """Joins items into groups. If A is like B and B is like C, then A, B and C are one group."""
+
     def __init__(self, n: int):
         self.p = list(range(n))
 
@@ -220,10 +245,10 @@ class _UnionFind:
 
 
 # ---------------------------------------------------------------------------
-# Main entry
+# Find the duplicates
 # ---------------------------------------------------------------------------
 def _apply_scope(members: list[Member], scope: Scope) -> None:
-    """Copies outside the selected folders are never proposed for removal."""
+    """The tool never proposes to remove a copy outside the selected folders."""
     for m in members:
         m.in_scope = scope.contains(m.path)
         if not m.in_scope and m.action != KEEP:
@@ -237,13 +262,13 @@ def _candidate_rows(cfg: Config, index: Index) -> list[FileRow]:
 
 
 def exact_groups(cfg: Config, index: Index) -> list[Group]:
-    """Only the byte-identical tier, whole disk (used by the `folders` overview)."""
+    """Find only the exact copies on the whole disk. (The `folders` command uses this.)"""
     groups, _ = _exact_tier(cfg, index, _candidate_rows(cfg, index), [], WHOLE_DISK)
     return groups
 
 
 def find_duplicates(cfg: Config, index: Index, scope: Scope = WHOLE_DISK) -> DuplicateResult:
-    """Find duplicates of the files inside `scope`, searching the whole disk for copies."""
+    """Find duplicates of the files in `scope`. Look for copies on the whole disk."""
     rows = _candidate_rows(cfg, index)
     errors: list[str] = []
     groups: list[Group] = []
@@ -262,13 +287,22 @@ def find_duplicates(cfg: Config, index: Index, scope: Scope = WHOLE_DISK) -> Dup
 
 
 def _touches_scope(rows: list[FileRow], scope: Scope) -> bool:
+    """True if one or more of the rows are in the selected folders."""
     return scope.whole_disk or any(scope.contains(r.path) for r in rows)
 
 
 def _exact_tier(cfg, index, rows, errors, scope):
-    """Same size -> same first/last 64 KiB -> same full hash."""
-    wanted = lambda lists: [r for lst in lists if _touches_scope(lst, scope) for r in lst]
-    # Only sizes shared with a file in the selected folders need hashing.
+    """Find exact copies: the same size, then the same quick hash, then the same full hash."""
+
+    def wanted(row_groups):
+        # all rows of the groups that touch the selected folders
+        out = []
+        for group_rows in row_groups:
+            if _touches_scope(group_rows, scope):
+                out.extend(group_rows)
+        return out
+
+    # Hash only the sizes that a file in the selected folders also has.
     candidates = wanted(_buckets(rows, lambda r: r.size))
     compute_hashes(cfg, index, candidates, "partial_hash", errors, "Quick-hashing same-size files")
     candidates = wanted(_buckets(candidates, lambda r: (r.size, r.partial_hash) if r.partial_hash else None))
@@ -286,13 +320,13 @@ def _exact_tier(cfg, index, rows, errors, scope):
 
 
 def _representatives(rows, groups):
-    """What the next tier looks at: files not in any group, plus each group's keeper."""
+    """Give the files for the next tier: the files in no group, plus the keeper of each group."""
     grouped = {m.path for g in groups for m in g.members}
     return [r for r in rows if r.path not in grouped] + [g.keeper.row for g in groups]
 
 
 def _pixel_tier(cfg, index, rows, errors, scope):
-    """Images of the same width x height whose decoded pixels are identical."""
+    """Find images with the same width, the same height and the same pixels."""
     imgs = [r for r in rows if r.ext in DECODABLE_IMAGE_EXT and r.width and r.height and not r.meta_error]
     candidates = [r for lst in _buckets(imgs, lambda r: (r.width, r.height)) if _touches_scope(lst, scope) for r in lst]
     compute_hashes(cfg, index, candidates, "pixel_hash", errors, "Comparing pixels of same-size images")
@@ -313,6 +347,7 @@ def _pixel_tier(cfg, index, rows, errors, scope):
 
 
 def _similar_tier(cfg, index, rows, errors, scope):
+    """Find images that look the same (look-alike hashes with few different bits)."""
     imgs = [
         r for r in rows
         if r.ext in DECODABLE_IMAGE_EXT and not r.meta_error and (r.width or 0) >= 32 and (r.height or 0) >= 32
@@ -324,7 +359,7 @@ def _similar_tier(cfg, index, rows, errors, scope):
     for r in imgs:
         if r.dhash:
             v = int(r.dhash, 16)
-            # Flat / blank images (all one colour) match everything - skip them.
+            # Blank images (one colour only) match all other images. Skip them.
             if 8 <= v.bit_count() <= 120:
                 hashed.append((r, v))
 
@@ -334,7 +369,7 @@ def _similar_tier(cfg, index, rows, errors, scope):
     uf = _UnionFind(len(hashed))
     for i, (r, v) in enumerate(hashed):
         if not scope.contains(r.path):
-            continue  # only link images through files in the selected folders
+            continue  # join images only through files in the selected folders
         for j, _d in tree.search(v, cfg.similar_threshold):
             if j != i:
                 uf.union(i, j)
@@ -354,8 +389,8 @@ def _similar_tier(cfg, index, rows, errors, scope):
         for m in members:
             m.distance = (int(m.row.dhash, 16) ^ kv).bit_count()
             if m.action == REMOVE:
-                # Union-find can chain A~B~C; only members close to the keeper
-                # itself may get the configured action, the rest are REVIEW.
+                # The groups can make a chain (A is like B, B is like C). Only copies near
+                # the keeper can get the configured action. All other copies get REVIEW.
                 if cfg.similar_action == REVIEW or m.distance > cfg.similar_threshold:
                     m.action = REVIEW
         _apply_scope(members, scope)

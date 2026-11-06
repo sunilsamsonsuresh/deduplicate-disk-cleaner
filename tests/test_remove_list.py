@@ -1,13 +1,13 @@
 """remove-list: move the files named in a text list to quarantine (e.g. downloaded movies)."""
 
-from diskcleaner import hashing
-from diskcleaner.cli import main
-from diskcleaner.safeops import undo
-from diskcleaner.dedupe import quarantine_list, read_path_list
+from diskcleaner import file_hashes
+from diskcleaner.commands import main
+from diskcleaner.undo_log import undo
+from diskcleaner.remove_duplicates import quarantine_list, read_path_list
 
 
 def _snapshot(root):
-    return {p.relative_to(root).as_posix(): hashing.full_hash(p)
+    return {p.relative_to(root).as_posix(): file_hashes.full_hash(p)
             for p in root.rglob("*") if p.is_file() and "_DiskCleaner" not in p.parts}
 
 

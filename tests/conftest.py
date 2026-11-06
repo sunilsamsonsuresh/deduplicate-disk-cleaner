@@ -11,10 +11,10 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from diskcleaner import utils  # noqa: E402
+from diskcleaner import helpers  # noqa: E402
 from diskcleaner.config import load_config  # noqa: E402
 
-utils.QUIET = True
+helpers.QUIET = True
 
 
 def make_image(path: Path, seed: int, size=(320, 240), exif_date: str | None = None, quality=90) -> Path:

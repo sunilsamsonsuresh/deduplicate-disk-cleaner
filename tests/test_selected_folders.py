@@ -5,14 +5,14 @@ import json
 
 import pytest
 
-from diskcleaner import organizer, reports
-from diskcleaner.cli import main
+from diskcleaner import organize, reports
+from diskcleaner.commands import main
 from diskcleaner.config import ConfigError
-from diskcleaner.dedupe import apply_plan, load_plan
-from diskcleaner.duplicates import KEEP, REMOVE, SKIP, find_duplicates
-from diskcleaner.index import Index
-from diskcleaner.scanner import scan
-from diskcleaner.scope import Scope, resolve_scope
+from diskcleaner.remove_duplicates import apply_plan, load_plan
+from diskcleaner.find_duplicates import KEEP, REMOVE, SKIP, find_duplicates
+from diskcleaner.file_index import Index
+from diskcleaner.scan_disk import scan
+from diskcleaner.selected_folders import Scope, resolve_scope
 
 
 def _find(cfg, folders):
@@ -141,7 +141,7 @@ def test_skip_copy_is_never_used_as_keeper(cfg):
 def test_organize_scope(cfg):
     with Index(cfg.db_path) as idx:
         scan(cfg, idx)
-        items = organizer.build_plan(cfg, idx, resolve_scope(cfg, ["Camera"]))
+        items = organize.build_plan(cfg, idx, resolve_scope(cfg, ["Camera"]))
     assert [i.src for i in items] == ["Camera/IMG_20170812_101500.jpg"]
 
 

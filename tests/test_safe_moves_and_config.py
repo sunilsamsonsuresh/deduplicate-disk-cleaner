@@ -3,16 +3,8 @@ import os
 import pytest
 
 from diskcleaner.config import ConfigError, load_config
-from diskcleaner.safeops import (
-    Manifest,
-    SafetyError,
-    check_writable,
-    read_manifest,
-    resolve_inside,
-    safe_copy,
-    safe_move,
-    unique_path,
-)
+from diskcleaner.safe_moves import SafetyError, check_writable, resolve_inside, safe_copy, safe_move, unique_path
+from diskcleaner.undo_log import Manifest, read_manifest
 from tests.conftest import write_config
 
 

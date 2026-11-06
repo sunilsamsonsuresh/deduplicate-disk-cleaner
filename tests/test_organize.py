@@ -1,16 +1,16 @@
 import shutil
 
-from diskcleaner import hashing, organizer
-from diskcleaner.index import Index
-from diskcleaner.safeops import undo
-from diskcleaner.scanner import scan
+from diskcleaner import file_hashes, organize
+from diskcleaner.file_index import Index
+from diskcleaner.undo_log import undo
+from diskcleaner.scan_disk import scan
 from tests.conftest import make_image
 
 
 def _plan(cfg):
     with Index(cfg.db_path) as idx:
         scan(cfg, idx)
-        return {i.src: i for i in organizer.build_plan(cfg, idx)}
+        return {i.src: i for i in organize.build_plan(cfg, idx)}
 
 
 def test_plan_targets(cfg):
@@ -32,27 +32,27 @@ def test_plan_targets(cfg):
 
 def test_apply_and_undo_move(cfg):
     root = cfg.root
-    before = {p.relative_to(root).as_posix(): hashing.full_hash(p) for p in root.rglob("*") if p.is_file()}
+    before = {p.relative_to(root).as_posix(): file_hashes.full_hash(p) for p in root.rglob("*") if p.is_file()}
     items = list(_plan(cfg).values())
     with Index(cfg.db_path) as idx:
-        res = organizer.apply_plan(cfg, items, idx)
+        res = organize.apply_plan(cfg, items, idx)
     assert res.done == len(items) and not res.skipped
     assert (root / "_Organized/Photos/2015/2015-06 Goa Trip/IMG_0001.jpg").exists()
     assert not (root / "Goa Trip 2015/IMG_0001.jpg").exists()
     # same multiset of contents - nothing lost or altered
-    after = sorted(hashing.full_hash(p) for p in root.rglob("*") if p.is_file())
+    after = sorted(file_hashes.full_hash(p) for p in root.rglob("*") if p.is_file())
     assert after == sorted(before.values())
 
     u = undo(cfg, res.manifest)
     assert u.restored == len(items) and not u.problems
-    restored = {p.relative_to(root).as_posix(): hashing.full_hash(p) for p in root.rglob("*") if p.is_file()}
+    restored = {p.relative_to(root).as_posix(): file_hashes.full_hash(p) for p in root.rglob("*") if p.is_file()}
     assert restored == before
     assert not (root / "_Organized").exists() or not any((root / "_Organized").rglob("*.*"))
 
 
 def test_apply_copy_mode_and_undo(cfg):
     items = list(_plan(cfg).values())
-    res = organizer.apply_plan(cfg, items, mode="copy")
+    res = organize.apply_plan(cfg, items, mode="copy")
     assert res.done == len(items)
     assert (cfg.root / "Goa Trip 2015/IMG_0001.jpg").exists()  # original untouched
     assert (cfg.root / "_Organized/Photos/2015/2015-06 Goa Trip/IMG_0001.jpg").exists()
@@ -67,10 +67,10 @@ def test_existing_destination_never_overwritten(cfg):
     item = plan["Camera/IMG_20170812_101500.jpg"]
     blocker = cfg.root / item.dst
     make_image(blocker, seed=99)  # a different file appears at the destination
-    blocker_hash = hashing.full_hash(blocker)
-    res = organizer.apply_plan(cfg, [item])
+    blocker_hash = file_hashes.full_hash(blocker)
+    res = organize.apply_plan(cfg, [item])
     assert res.done == 1
-    assert hashing.full_hash(blocker) == blocker_hash
+    assert file_hashes.full_hash(blocker) == blocker_hash
     assert (blocker.parent / "IMG_20170812_101500 (2).jpg").exists()
 
 
@@ -79,7 +79,7 @@ def test_identical_destination_is_left_alone(cfg):
     item = plan["Camera/IMG_20170812_101500.jpg"]
     (cfg.root / item.dst).parent.mkdir(parents=True)
     shutil.copy2(cfg.root / item.src, cfg.root / item.dst)
-    res = organizer.apply_plan(cfg, [item])
+    res = organize.apply_plan(cfg, [item])
     assert res.done == 0 and res.identical_skipped == 1
     assert (cfg.root / item.src).exists()
 
@@ -87,25 +87,25 @@ def test_identical_destination_is_left_alone(cfg):
 def test_destination_outside_organized_refused(cfg):
     item = _plan(cfg)["Camera/IMG_20170812_101500.jpg"]
     item.dst = "Somewhere/else.jpg"
-    res = organizer.apply_plan(cfg, [item])
+    res = organize.apply_plan(cfg, [item])
     assert res.done == 0 and (cfg.root / item.src).exists()
 
 
 def test_already_organized_files_are_not_replanned(cfg):
     items = list(_plan(cfg).values())
-    organizer.apply_plan(cfg, items)
+    organize.apply_plan(cfg, items)
     assert _plan(cfg) == {}
 
 
 def test_empty_dir_cleanup(cfg):
     items = list(_plan(cfg).values())
-    organizer.apply_plan(cfg, items)
+    organize.apply_plan(cfg, items)
     (cfg.root / "Camera" / ".DS_Store").write_bytes(b"junk")
-    empties = organizer.find_empty_dirs(cfg)
+    empties = organize.find_empty_dirs(cfg)
     rel = {d.relative_to(cfg.root).as_posix() for d in empties}
     assert {"Camera", "DCIM/100CANON", "DCIM", "Family/2016/07", "Family/2016", "Family"} <= rel
     assert "Docs" not in rel and ".hidden" not in rel
-    organizer.remove_empty_dirs(empties)
+    organize.remove_empty_dirs(empties)
     assert not (cfg.root / "Camera").exists()
     assert (cfg.root / "Docs/report.pdf").exists()
     assert (cfg.root / ".hidden/secret.jpg").exists()
@@ -152,7 +152,7 @@ def test_organize_inside_each_device_folder(cfg):
 def test_organize_inside_apply_and_undo(cfg):
     _device_disk(cfg)
     items = list(_plan(cfg).values())
-    res = organizer.apply_plan(cfg, items)
+    res = organize.apply_plan(cfg, items)
     assert res.done == len(items) and not res.skipped
     assert (cfg.root / "Existing Photos/Samsung A8/2019/2019-06/IMG_1.jpg").exists()
     assert undo(cfg, res.manifest).restored == len(items)
@@ -163,5 +163,5 @@ def test_organize_inside_never_crosses_folders(cfg):
     _device_disk(cfg)
     item = _plan(cfg)["Existing Photos/Samsung A8/DCIM/Camera/IMG_1.jpg"]
     item.dst = "Existing Photos/Windows Folders/2019/2019-06/IMG_1.jpg"  # tampered plan
-    res = organizer.apply_plan(cfg, [item])
+    res = organize.apply_plan(cfg, [item])
     assert res.done == 0 and (cfg.root / item.src).exists()
