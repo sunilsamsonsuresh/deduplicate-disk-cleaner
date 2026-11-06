@@ -1,0 +1,4 @@
+Pillow>=10.0          # image metadata, pixel & perceptual hashing
+pillow-heif>=0.16     # iPhone HEIC/HEIF photos (optional, recommended)
+tqdm>=4.66            # progress bars (optional)
+pytest>=8.0           # tests

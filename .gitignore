@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# your local settings and the tool's working data (index, reports, undo logs)
+config.toml
+state/
+# macOS folder files
+.DS_Store
+# my own disk notes (personal, not for the public repo)
+docs/MY_DISK_PLAN.md

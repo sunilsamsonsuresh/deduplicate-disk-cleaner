@@ -1,0 +1,110 @@
+# ---------------------------------------------------------------------------
+# Disk Cleaner configuration
+# Copy this file to config.toml and edit at least [disk].root
+#   cp config.example.toml config.toml
+# ---------------------------------------------------------------------------
+
+[disk]
+# The external disk (or a folder on it) to clean. On macOS external disks
+# are mounted under /Volumes. Example: "/Volumes/MyPassport"
+root = "/Volumes/CHANGE_ME"
+
+# Only scan these sub-folders of root (relative paths). Empty = whole disk.
+include = []
+
+# Folder / file names to skip anywhere on the disk (case-insensitive, exact
+# name match). Quarantine and state folders are always skipped automatically.
+exclude = [
+  ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems",
+  ".DocumentRevisions-V100", "$RECYCLE.BIN", "System Volume Information",
+  ".DS_Store", "Thumbs.db", "desktop.ini",
+]
+
+[scope]
+# Work folder by folder: list the folders (relative to root) to clean in this
+# round, e.g. ["recup_dir.1", "Lost Files", "Photos/2015"]. Empty = whole disk.
+# The WHOLE disk is still searched for copies (so the report can tell you where
+# else each file exists), but only files inside these folders are ever removed
+# or organized. Copies elsewhere are shown as SKIP and left alone.
+# The --folder option on the command line overrides this list.
+folders = []
+
+[state]
+# Where the index database, reports and undo manifests are kept.
+# Keep this OFF the disk being cleaned (default: ./state inside this project).
+dir = "./state"
+
+[scan]
+skip_hidden = true          # skip dot-files / dot-folders (incl. macOS "._" files)
+min_size_bytes = 1          # 0-byte files are listed in status but never "duplicates"
+follow_symlinks = false
+# How many files are read/compared at the same time (1-32). More helps on fast
+# disks; an old USB disk is the real limit, so 4 is a gentle default.
+workers = 4
+
+[duplicates]
+find_exact = true           # byte-for-byte identical files (any type)
+find_pixel_identical = true # images with identical pixels but different bytes/metadata
+find_similar = true         # visually similar images (resized / recompressed)
+
+# Hamming distance (out of 128 bits) for "similar" images.
+# 0-4 = near certain, 5-10 = likely same shot, >12 = risky.
+similar_threshold = 6
+
+# Default proposed action in the report for each tier: "REMOVE" or "REVIEW".
+# REVIEW is never removed unless you change it to REMOVE in the CSV.
+pixel_identical_action = "REMOVE"
+similar_action = "REVIEW"
+
+# Path fragments (case-insensitive) that indicate a recovered / low-quality copy.
+# Copies in these locations are removed in preference to others.
+low_priority_patterns = [
+  "recup_dir", "found.0", "lost files", "lost+found", "$recycle.bin",
+  "recovered", "recovery", "orphan", "deep scan", "raw files", "lost partition",
+  "lost dir", "file recovery", "/trash", ".chk",
+  "files lost original directory", "lost original", "reconstructed", "/found files",
+]
+
+# Folders (relative to root) whose copies you'd rather keep. E.g. ["Photos/Family"]
+preferred_folders = []
+
+[safety]
+# Duplicates are MOVED here (relative to root, so the move is instant on the
+# same disk). Nothing is permanently deleted until you run `purge`.
+quarantine_dir = "_DiskCleaner/Quarantine"
+# Re-hash both the kept and the removed file right before every move.
+verify_before_move = true
+
+[organize]
+# Organized tree is created here (relative to root).
+destination = "_Organized"
+# Which categories to organize: photos, videos, audio, documents, archives, other
+categories = ["photos", "videos"]
+# "move" (instant on same disk, undoable) or "copy" (needs free space).
+mode = "move"
+# Folder layout. Placeholders: {category} {year} {month_dir}
+#   month_dir = "2015-06", "2015-06 Goa Trip", "Unknown Month" ...
+layout = "{category}/{year}/{month_dir}"
+# Folders that are ALREADY organised by source/device. Each one keeps its name
+# and gets its own date folders inside it, instead of going to `destination`:
+#   Existing Photos/Samsung A8/2019/2019-06/IMG_1234.jpg
+#   Existing Photos/Windows Folders/2016/2016-03 Birthday/IMG_5.jpg
+# "Existing Photos/*" means: every sub-folder of "Existing Photos" separately.
+# Photos anywhere else (e.g. recovery folders) go into the uniform tree above.
+organize_inside = []
+layout_inside = "{year}/{month_dir}"
+# Re-use meaningful existing folder names (e.g. "Goa Trip 2015") as event names.
+keep_event_names = true
+# Fall back to the file's modified time when no better date exists.
+use_file_mtime = true
+# Ignore modified times on/after this date (YYYY-MM-DD). Set it to the day you
+# ran the recovery software - recovered files are often stamped with that date.
+# `status` shows the most common modified dates to help you pick it.
+ignore_mtime_after = ""
+# Individual days to ignore as well, e.g. a day when thousands of files were
+# copied at once and all got that date: ["2015-10-21"]
+ignore_mtime_dates = []
+# Dates before this year are treated as bogus (camera clock not set, etc.).
+min_year = 1990
+# Extra folder names that should never be used as event names.
+generic_folder_names = []
